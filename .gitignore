@@ -1,3 +1,10 @@
+# Output Files
+/results/*
+/slurm_logs/
+/archive/
+/inputs/*
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
