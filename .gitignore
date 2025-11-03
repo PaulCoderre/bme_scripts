@@ -3,7 +3,7 @@
 /slurm_logs/
 /archive/
 /inputs/*
-
+/camels-spat/*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
