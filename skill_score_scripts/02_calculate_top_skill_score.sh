@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --time=0-3:00:00
+#SBATCH --cpus-per-task=4
+#SBATCH --time=0-00:30:00
 #SBATCH --mem=96G
 #SBATCH --job-name=scenarios
 #SBATCH --error=slurm_logs/slurm_%j.err
@@ -15,8 +15,17 @@ module use /work/comphyd_lab/local/modules/spack/2024v5/modules/linux-rocky8-x86
 module restore scimods
 source ~/virtual-envs/scienv/bin/activate
 
+# Print job info
+echo "=========================================="
+echo "Job ID: $SLURM_JOB_ID"
+echo "Node: $SLURM_NODELIST"
+echo "Started at: $(date)"
+echo "=========================================="
 
-python cs_large_sample_variance_components.py
+# Pass --top-only flag to only process rank 1
+Rscript 02_calculate_skill_score.R --top-only
+
+echo "Completed at: $(date)"
 
 
 

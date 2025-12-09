@@ -6,11 +6,15 @@ library(readr)
 library(purrr)
 
 # =======================================
+# This script reads the benchmark flows calculated in 01_camels-spat_bm.py, as well as the FUSE simulated timeseries and performance metrics
+# to calculate the BME for each benchmark at each catchment. The output is a single csv with skill scores for each catchment and benchmark
+# ===========================
+
 # Inputs
 # Path to sim runs
-rdata_path <- "./camels-spat/SimArray.Rdata"
-evaluation_path <- "./camels-spat/Eval_FUSE.Rdata"
-bm_path <- "camels-spat/bm_outputs_full/"
+rdata_path <- "../camels-spat/SimArray.Rdata"
+evaluation_path <- "../camels-spat/Eval_FUSE.Rdata"
+bm_path <- "../camels-spat/02_results/final_bm_flows/"
 
 
 # Define periods and corresponding masks
@@ -20,20 +24,21 @@ periods <- list(
   all         = NULL  # No mask for 'all'
 )
 
-# Define the metric to maximize for FUSE decisions
+# Define the metric to rank by
 fuse_metric <- "Cal_KGE"
 
 # define method
-method = 'nse'
+method = 'kge'
 
-# define output file
-output_file <- file.path("camels-spat/full_bm_skill_scores/", "nse_full_skill_scores.csv")  # change folder if needed
+# define output folder
+output_folder <- file.path("../camels-spat/02_results/kge/", "skill_scores")
 
 # ========================================
 # Load Robjects
 load(rdata_path)
 
 load(evaluation_path)
+
 
 # Rename evaluation cols
 names(mydf)[3:10] <- c(
@@ -57,21 +62,69 @@ csv_files <- list.files(path = bm_path, pattern = "\\.csv$", full.names = TRUE)
 csv_codes <- gsub("_BM\\.csv$", "", basename(csv_files))
 
 
-# Clean up diagnostic cols and make names unique
-names(mydf) <- make.names(names(mydf))
-names(mydf) <- make.unique(names(mydf))
-print(names(mydf))
+# ========================================
+# Command-line argument: top rank only?
+# ========================================
+args <- commandArgs(trailingOnly = TRUE)
+top_rank_only <- FALSE
 
-# Find the models with the best value of fuse_metric
-best_models <- mydf %>%
+if (length(args) > 0) {
+  if (args[1] == "--top-only" || args[1] == "-t" || args[1] == "--top") {
+    top_rank_only <- TRUE
+    cat("\n========================================\n")
+    cat("*** TOP RANK ONLY MODE ***\n")
+    cat("Only processing rank 1 (best Cal_KGE models)\n")
+    cat("========================================\n\n")
+  }
+}
+
+
+# Rank all models by fuse_metric within each catchment
+ranked_models <- mydf %>%
+  filter(Codes %in% csv_codes) %>%
   group_by(Codes) %>%
-  filter(.data[[fuse_metric]] == max(.data[[fuse_metric]], na.rm = TRUE)) %>%
-  slice(1) %>%  # in case of ties, take the first
+  arrange(desc(.data[[fuse_metric]])) %>%
+  mutate(rank = row_number()) %>%
   ungroup()
 
-# Trim best_models to only the rows with Codes matching the CSV files
-models_trimmed <- best_models %>%
-  filter(Codes %in% csv_codes)
+# Get the total number of ranks
+total_ranks <- max(ranked_models$rank, na.rm = TRUE)
+
+cat("Total number of ranks:", total_ranks, "\n")
+
+# ========================================
+# Determine which ranks to process
+# ========================================
+slurm_array_task_id <- Sys.getenv("SLURM_ARRAY_TASK_ID")
+
+if (top_rank_only) {
+  # Only process rank 1 (best models)
+  ranks_to_process <- 1
+  cat("\nProcessing ONLY rank 1 (best models by", fuse_metric, ")\n\n")
+  
+} else if (slurm_array_task_id != "") {
+  # Running as SLURM array job - split ranks across tasks
+  task_id <- as.integer(slurm_array_task_id)
+  n_tasks <- as.integer(Sys.getenv("SLURM_ARRAY_TASK_COUNT"))
+  
+  # Calculate which ranks this task should process
+  ranks_per_task <- ceiling(total_ranks / n_tasks)
+  start_rank <- (task_id - 1) * ranks_per_task + 1
+  end_rank <- min(task_id * ranks_per_task, total_ranks)
+  
+  ranks_to_process <- start_rank:end_rank
+  
+  cat("\n========================================\n")
+  cat("SLURM Array Job Mode\n")
+  cat("Task ID:", task_id, "of", n_tasks, "\n")
+  cat("Processing ranks:", start_rank, "to", end_rank, "\n")
+  cat("========================================\n\n")
+  
+} else {
+  # Not running via SLURM - process all ranks
+  ranks_to_process <- 1:total_ranks
+  cat("\nProcessing all ranks (not using SLURM array)\n\n")
+}
 
 
 # Create lookup table: code → csv_file
@@ -80,10 +133,6 @@ csv_info <- data.frame(
   csv_file = csv_files,
   stringsAsFactors = FALSE
 )
-
-# Merge CSV file paths onto models_trimmed
-models_trimmed <- models_trimmed %>%
-  left_join(csv_info, by = c("Codes" = "code"))
 
 
 # ========================================
@@ -153,140 +202,188 @@ calculate_skill_score <- function(observed, simulated, benchmark, method = "nse"
 }
 
 
-
 # ==================================
-# Iterate through each catchment 
+# Loop through each rank
+# ==================================
 
-# ------------------------------
-# Initialize storage for skill scores
-# ------------------------------
-# We'll use a nested list:
-# - Top level: catchment code
-# - Second level: period ('calibration', 'validation', 'all')
-# - Third level: benchmark metric names -> skill score values
-# We'll also store latitude and longitude at the top level for each catchment
-skill_scores <- list()
+# Create output directory
+dir.create(output_folder, showWarnings = FALSE, recursive = TRUE)
 
-# ------------------------------
-# Loop over all selected models
-# ------------------------------
-for (i in seq_len(nrow(models_trimmed))) {
+for (current_rank in ranks_to_process) {
+  
+  cat("\n========================================\n")
+  cat("Processing rank", current_rank, "of", total_ranks, "\n")
+  cat("========================================\n")
+  
+  # Filter to models with the current rank
+  models_at_rank <- ranked_models %>%
+    filter(rank == current_rank) %>%
+    left_join(csv_info, by = c("Codes" = "code"))
+  
+  # Skip if no models at this rank
+  if(nrow(models_at_rank) == 0) {
+    cat("No models found at rank", current_rank, "\n")
+    next
+  }
+  
+  cat("Number of catchments at rank", current_rank, ":", nrow(models_at_rank), "\n")
   
   # ------------------------------
-  # Extract simulation info
+  # Initialize storage for skill scores
   # ------------------------------
-  catchment_code <- models_trimmed$Codes[i]          # Catchment identifier
-  best_decision  <- models_trimmed$ModelDecisions[i] # Best model decision for that catchment
-  
-  # Find the indices in the Qsim_array corresponding to this catchment and decision
-  catchment_index <- which(dimnames(Qsim_array)[[3]] == catchment_code)
-  decision_index  <- which(as.numeric(dimnames(Qsim_array)[[2]]) == best_decision)
-  
-  # Extract the Dates for the simulated catchment
-  sim_time <- as.Date(dimnames(Qsim_array)[[1]])  # or use Dates directly if named
-  
-  # Subset Qsim_array to get the simulated streamflow time series
-  cout <- Qsim_array[, decision_index, catchment_index]
-  head(sim_time)
-  # ------------------------------
-  # Read benchmark CSV
-  # ------------------------------
-  csv_path <- models_trimmed$csv_file[i]
-  bm_df <- read_csv(csv_path)
-  
-  # Keep only the dates that exist in bm_df
-  mask <- sim_time %in% bm_df$time
-  sim_df <- data.frame(time = sim_time[mask], Qsim = cout[mask])
-  
-  # Merge safely with benchmark data
-  bm_df <- bm_df %>% left_join(sim_df, by = "time")
-  
-  # Merge the model simulation as a new column
- # bm_df <- bm_df %>% mutate(Qsim = cout)
-  
-  # Identify all benchmark columns (those starting with 'bm_')
-  bm_columns <- grep("^bm_", names(bm_df), value = TRUE)
+  skill_scores <- list()
   
   # ------------------------------
-  # Store latitude and longitude
+  # Loop over all models at this rank
   # ------------------------------
-  # These will be included in the final data frame
-  skill_scores[[catchment_code]] <- list(
-    latitude  = bm_df$latitude[1],
-    longitude = bm_df$longitude[1]
-  )
+  for (i in seq_len(nrow(models_at_rank))) {
     
-  # ------------------------------
-  # Loop over defined periods (calibration, validation, all)
-  # ------------------------------
-  for (period_name in names(periods)) {
-    
-    mask_col <- periods[[period_name]]  # Column name for the mask, if any
-    
-    # Subset the data to the current period if mask exists; otherwise use all data
-    df_period <- if(!is.null(mask_col) && mask_col %in% names(bm_df)) {
-      bm_df %>% filter(.data[[mask_col]] == TRUE)
-    } else bm_df
-    
-    # Initialize storage for benchmarks for this period
-    skill_scores[[catchment_code]][[period_name]] <- list()
+    # Progress indicator
+    if (i %% 50 == 0) {
+      cat("  Progress:", i, "/", nrow(models_at_rank), "catchments processed\n")
+    }
     
     # ------------------------------
-    # Loop over benchmark columns and calculate skill scores
+    # Extract simulation info
     # ------------------------------
-    for (bm_col in bm_columns) {
+    catchment_code <- models_at_rank$Codes[i]          # Catchment identifier
+    model_decision  <- models_at_rank$ModelDecisions[i] # Model decision for that catchment
+    
+    # Find the indices in the Qsim_array corresponding to this catchment and decision
+    catchment_index <- which(dimnames(Qsim_array)[[3]] == catchment_code)
+    decision_index  <- which(as.numeric(dimnames(Qsim_array)[[2]]) == model_decision)
+    
+    # Check if indices are valid
+    if(length(catchment_index) == 0 || length(decision_index) == 0) {
+      cat("    Warning: Could not find indices for catchment", catchment_code, "\n")
+      next
+    }
+    
+    # Extract the Dates for the simulated catchment
+    sim_time <- as.Date(dimnames(Qsim_array)[[1]])  # or use Dates directly if named
+    
+    # Subset Qsim_array to get the simulated streamflow time series
+    cout <- Qsim_array[, decision_index, catchment_index]
+    
+    # ------------------------------
+    # Read benchmark CSV
+    # ------------------------------
+    csv_path <- models_at_rank$csv_file[i]
+    
+    if(is.na(csv_path) || !file.exists(csv_path)) {
+      cat("    Warning: CSV file not found for catchment", catchment_code, "\n")
+      next
+    }
+    
+    bm_df <- read_csv(csv_path, show_col_types = FALSE, name_repair = "minimal")
+    
+    # Remove any unnamed columns (those with empty names, NA names, or starting with ...)
+    col_names <- names(bm_df)
+    valid_cols <- !is.na(col_names) & col_names != "" & !grepl("^\\.\\.\\.", col_names)
+    bm_df <- bm_df[, valid_cols, drop = FALSE]
+    
+    # Keep only the dates that exist in bm_df
+    mask <- sim_time %in% bm_df$time
+    sim_df <- data.frame(time = sim_time[mask], Qsim = cout[mask])
+    
+    # Merge safely with benchmark data
+    bm_df <- bm_df %>% left_join(sim_df, by = "time")
+    
+    # Identify all benchmark columns (those starting with 'bm_')
+    bm_columns <- grep("^bm_", names(bm_df), value = TRUE)
+    
+    # ------------------------------
+    # Store latitude and longitude
+    # ------------------------------
+    skill_scores[[catchment_code]] <- list(
+      latitude  = bm_df$latitude[1],
+      longitude = bm_df$longitude[1],
+      rank = current_rank,
+      model_decision = model_decision,
+      cal_kge = models_at_rank$Cal_KGE[i]
+    )
+    
+    # ------------------------------
+    # Loop over defined periods (calibration, validation, all)
+    # ------------------------------
+    for (period_name in names(periods)) {
       
-      skill <- calculate_skill_score(
-        observed  = df_period$q_obs,       # Observed flow
-        simulated = df_period$Qsim,        # Model simulated flow
-        benchmark = df_period[[bm_col]],   # Benchmark flow
-        method    = "nse"                  # Using Nash-Sutcliffe efficiency as skill metric
-      )
+      mask_col <- periods[[period_name]]  # Column name for the mask, if any
       
-      # Optional: skip benchmarks that don't work for unseen data
-      if(bm_col %in% c("bm_annual_mean_flow","bm_annual_median_flow")) skill <- NA_real_
+      # Subset the data to the current period if mask exists; otherwise use all data
+      df_period <- if(!is.null(mask_col) && mask_col %in% names(bm_df)) {
+        bm_df %>% filter(.data[[mask_col]] == TRUE)
+      } else bm_df
       
-      # Store skill score in the nested list
-      skill_scores[[catchment_code]][[period_name]][[bm_col]] <- skill
+      # Initialize storage for benchmarks for this period
+      skill_scores[[catchment_code]][[period_name]] <- list()
+      
+      # ------------------------------
+      # Loop over benchmark columns and calculate skill scores
+      # ------------------------------
+      for (bm_col in bm_columns) {
+        
+        skill <- calculate_skill_score(
+          observed  = df_period$q_obs,       # Observed flow
+          simulated = df_period$Qsim,        # Model simulated flow
+          benchmark = df_period[[bm_col]],   # Benchmark flow
+          method    = method                 # Using defined metric
+        )
+        
+        # Optional: skip benchmarks that don't work for unseen data
+        if(bm_col %in% c("bm_annual_mean_flow","bm_annual_median_flow")) skill <- NA_real_
+        
+        # Store skill score in the nested list
+        skill_scores[[catchment_code]][[period_name]][[bm_col]] <- skill
+      }
     }
   }
+  
+  # ------------------------------
+  # Flatten nested list into a tidy data.frame
+  # ------------------------------
+  skill_scores_long <- imap_dfr(skill_scores, function(catchment_list, catchment) {
+    
+    # Extract metadata stored at the top level of the catchment list
+    lat_value <- catchment_list$latitude
+    lon_value <- catchment_list$longitude
+    rank_value <- catchment_list$rank
+    decision_value <- catchment_list$model_decision
+    kge_value <- catchment_list$cal_kge
+    
+    # Loop over periods
+    map_dfr(names(catchment_list), function(period_name) {
+      
+      # Skip metadata entries
+      if(period_name %in% c("latitude","longitude","rank","model_decision","cal_kge")) return(NULL)
+      
+      benchmarks_list <- catchment_list[[period_name]]
+      
+      # Construct a tibble for this period containing all benchmarks
+      tibble(
+        catchment       = catchment,
+        latitude        = lat_value,
+        longitude       = lon_value,
+        rank            = rank_value,
+        model_decision  = decision_value,
+        cal_kge         = kge_value,  # Cal_KGE value for this model decision at this catchment
+        period          = period_name,
+        benchmark       = names(benchmarks_list),
+        skill_score     = unlist(benchmarks_list)
+      )
+    })
+  })
+  
+  
+    # Save to CSV for this rank
+    output_file <- file.path(output_folder, sprintf("%s_skill_scores_rank_%03d.csv", method, current_rank))
+    write.csv(skill_scores_long, output_file, row.names = FALSE)
+    
+    cat("Skill scores for rank", current_rank, "saved to", output_file, "\n")
+    cat("Output file contains", nrow(skill_scores_long), "rows\n")
 }
 
-# ------------------------------
-# Flatten nested list into a tidy data.frame
-# ------------------------------
-# We'll include lat/lon at catchment level, then expand each period and benchmark combination
-skill_scores_long <- imap_dfr(skill_scores, function(catchment_list, catchment) {
-  
-  # Extract lat/lon stored at the top level of the catchment list
-  lat_value <- catchment_list$latitude
-  lon_value <- catchment_list$longitude
-  
-  # Loop over periods
-  map_dfr(names(catchment_list), function(period_name) {
-    
-    # Skip lat/lon entries
-    if(period_name %in% c("latitude","longitude")) return(NULL)
-    
-    benchmarks_list <- catchment_list[[period_name]]
-    
-    # Construct a tibble for this period containing all benchmarks
-    tibble(
-      catchment   = catchment,
-      latitude    = lat_value,
-      longitude   = lon_value,
-      period      = period_name,
-      benchmark   = names(benchmarks_list),
-      skill_score = unlist(benchmarks_list)
-    )
-  })
-})
-
-
-# Save to CSV
-dir.create(dirname(output_file), showWarnings = FALSE, recursive = TRUE)
-write.csv(skill_scores_long, output_file, row.names = FALSE)
-
-cat("Skill scores saved to", output_file, "\n")
-
-
+cat("\n========================================\n")
+cat("All ranks processed successfully!\n")
+cat("Output files saved in:", output_folder, "\n")
+cat("========================================\n")

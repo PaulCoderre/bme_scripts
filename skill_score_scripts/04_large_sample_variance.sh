@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
-#SBATCH --time=0-3:00:00
+#SBATCH --cpus-per-task=20
+#SBATCH --time=0-00:20:00
 #SBATCH --mem=96G
 #SBATCH --job-name=scenarios
 #SBATCH --error=slurm_logs/slurm_%j.err
@@ -16,7 +16,7 @@ module restore scimods
 source ~/virtual-envs/scienv/bin/activate
 
 
-Rscript 02_calculate_skill_score.R
+python 04_cs_large_sample_variance_components.py
 
 
 

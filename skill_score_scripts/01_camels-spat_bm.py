@@ -16,10 +16,15 @@ import sys
 
 # In[2]:
 
+# ==================
+# This script calculates the benchmark timeseries for each HydroBM benchmark at each of the FUSE CAMELS-SPAT basins 
+# It outputs a csv for the benchmark flows at each gauge to output_dir
+# ==================
 
+# Define FUSE sumulation base directory
 base_dir ='/work/comphyd_lab/users/cyril.thebault/Postdoc_Ucal/02_DATA/FUSE_Farahani/CAMELS-spat/Lumped/em-earth/KGE/1/'
 
-output_dir = 'camels-spat/bm_outputs_full/'
+output_dir = '../camels-spat/final_bm_flows/'
 
 
 
@@ -39,6 +44,7 @@ benchmarks = [
         "monthly_median_flow",
         "daily_mean_flow",
         "daily_median_flow",
+        "eckhardt_baseflow",
 
         # Long-term rainfall-runoff ratio benchmarks
         "rainfall_runoff_ratio_to_all",
@@ -52,10 +58,18 @@ benchmarks = [
         "monthly_rainfall_runoff_ratio_to_daily",
         "monthly_rainfall_runoff_ratio_to_timestep",
 
+        # Precipitation deviation benchmarks
+        "annual_scaled_daily_mean_flow",
+        "monthly_scaled_daily_mean_flow",
+
         # Schaefli & Gupta (2007) benchmarks
         "scaled_precipitation_benchmark",  # equivalent to "rainfall_runoff_ratio_to_daily"
         "adjusted_precipitation_benchmark",
-        "adjusted_smoothed_precipitation_benchmark",
+
+        # Parsimonious models
+        "adjusted_smoothed_precipitation_benchmark", # from Schaefli & Gupta (2007)
+        "baseflow_with_event_peaks",
+        "api_scaled_flow"
      ]
 
 # Read system number
